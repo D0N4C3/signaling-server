@@ -14,10 +14,10 @@ const admin = require('firebase-admin');
 // ——————————
 // 2) Firebase Admin
 // ——————————
+const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+
 admin.initializeApp({
-  credential: admin.credential.cert(
-    JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  ),
+  credential: admin.credential.cert(serviceAccount)
 });
 
 // ——————————
