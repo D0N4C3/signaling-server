@@ -1,4 +1,6 @@
-// signaling-server/index.js
+// server.js
+
+// 1) Load env
 require('dotenv').config();
 
 const express = require('express');
@@ -10,7 +12,7 @@ const winston = require('winston');
 const admin = require('firebase-admin');
 
 // ——————————
-// 1) Init Firebase Admin (for verifying ID tokens)
+// 2) Firebase Admin
 // ——————————
 admin.initializeApp({
   credential: admin.credential.cert(
@@ -19,25 +21,24 @@ admin.initializeApp({
 });
 
 // ——————————
-// 2) Setup Express with security middlewares
+// 3) Express + security
 // ——————————
 const app = express();
 app.use(helmet());
 app.use(express.json());
 app.use(
   rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 200, // limit each IP to 200 requests per windowMs
+    windowMs: 60_000,
+    max: 200,
   })
 );
 
-// Health check for uptime monitoring
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() });
-});
+app.get('/health', (_req, res) =>
+  res.json({ status: 'ok', timestamp: Date.now() })
+);
 
 // ——————————
-// 3) Setup Winston logger
+// 4) Logger
 // ——————————
 const logger = winston.createLogger({
   level: 'info',
@@ -49,37 +50,22 @@ const logger = winston.createLogger({
 });
 
 // ——————————
-// 4) Create HTTP + Socket.IO server
+// 5) HTTP + Socket.IO
 // ——————————
-const httpServer = createServer(app);
+const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: {
-    origin: process.env.CORS_ORIGINS.split(','),
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
+  cors: { origin: '*', methods: ['GET','POST'] },
 });
 
 // ——————————
-// 5) (Optional) Redis adapter for scaling
-// ——————————
-if (process.env.REDIS_URL) {
-  const pubClient = createClient({ url: process.env.REDIS_URL });
-  const subClient = pubClient.duplicate();
-  await Promise.all([pubClient.connect(), subClient.connect()]);
-  io.adapter(createAdapter(pubClient, subClient));
-  logger.info('🚀 Redis adapter enabled for scaling');
-}
-
-// ——————————
-// 6) Authenticate each socket via Firebase ID token
+// 6) (Optional) Auth middleware
 // ——————————
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth.token;
-    if (!token) throw new Error('No auth token');
+    if (!token) throw new Error('No token');
     const decoded = await admin.auth().verifyIdToken(token);
-    socket.data.user = decoded; // attach user info
+    socket.data.user = decoded;
     next();
   } catch (err) {
     logger.warn('Unauthorized socket', { error: err.message });
@@ -88,124 +74,97 @@ io.use(async (socket, next) => {
 });
 
 // ——————————
-// 7) Helper: wrap handlers with ack support & validation
+// 7) Safe handler
 // ——————————
 function safeHandler(fn) {
-  return (payload, callback = () => {}) => {
+  return (payload, cb = () => {}) => {
     try {
-      fn(payload, callback);
+      fn(payload, cb);
     } catch (err) {
       logger.error('Handler error', { err });
-      callback({ error: 'internal_error' });
+      cb({ error: 'internal_error' });
     }
   };
 }
 
 // ——————————
-// 8) Core socket logic
+// 8) Socket logic
 // ——————————
 io.on('connection', socket => {
-  const uid = socket.data.user.uid;
-  logger.info('Client connected', { socketId: socket.id, uid });
+  const uid = socket.data.user?.uid;
+  logger.info('📡 Client connected', { socketId: socket.id, uid });
 
-  // Join a session room
-  socket.on(
-    'join',
-    safeHandler((room, cb) => {
-      if (typeof room !== 'string') return cb({ error: 'invalid_room' });
-      socket.join(room);
-      logger.info('Joined room', { uid, room });
-      cb({ success: true });
-    })
-  );
-
-  // WebRTC: offer / answer / candidate
-  ['offer', 'answer', 'candidate'].forEach(event =>
-    socket.on(
-      event,
-      safeHandler((payload, cb) => {
-        if (
-          !payload ||
-          typeof payload.room !== 'string' ||
-          typeof payload[event === 'candidate' ? 'candidate' : 'sdp'] !==
-            'string'
-        ) {
-          return cb({ error: 'invalid_payload' });
-        }
-        socket.to(payload.room).emit(event, {
-          sender: uid,
-          ...payload,
-        });
-        cb({ success: true });
-      })
-    )
-  );
-
-  // Annotation controls: undo / clear / color
-  socket.on(
-    'undo',
-    safeHandler((room, cb) => {
-      if (typeof room !== 'string') return cb({ error: 'invalid_room' });
-      socket.to(room).emit('undo');
-      cb({ success: true });
-    })
-  );
-
-  socket.on(
-    'clear',
-    safeHandler((room, cb) => {
-      if (typeof room !== 'string') return cb({ error: 'invalid_room' });
-      socket.to(room).emit('clear');
-      cb({ success: true });
-    })
-  );
-
-  socket.on(
-    'color',
-    safeHandler((payload, cb) => {
-      if (
-        !payload ||
-        typeof payload.room !== 'string' ||
-        typeof payload.color !== 'number'
-      ) {
-        return cb({ error: 'invalid_payload' });
-      }
-      socket.to(payload.room).emit('color', payload.color);
-      cb({ success: true });
-    })
-  );
-
-  // Stroke drawing
-  socket.on('draw', safeHandler((payload, cb) => {
-    // basic validation
-    if (
-      !payload ||
-      typeof payload.room !== 'string' ||
-      !Array.isArray(payload.points) ||
-      typeof payload.color !== 'number' ||
-      typeof payload.width !== 'number'
-    ) {
-      return cb({ error: 'invalid_payload' });
-    }
-    // broadcast to all other clients in the room
-    socket.to(payload.room).emit('draw', {
-      points: payload.points,
-      color: payload.color,
-      width: payload.width,
-    });
+  // join
+  socket.on('join', safeHandler((room, cb) => {
+    if (typeof room !== 'string') return cb({ error: 'invalid_room' });
+    socket.join(room);
     cb({ success: true });
   }));
 
+  // signaling
+  ['offer','answer','candidate'].forEach(evt =>
+    socket.on(evt, safeHandler((data, cb) => {
+      if (
+        !data ||
+        typeof data.room !== 'string' ||
+        (evt === 'candidate'
+          ? typeof data.candidate !== 'object'
+          : typeof data.sdp !== 'string')
+      ) {
+        return cb({ error: 'invalid_payload' });
+      }
+      socket.to(data.room).emit(evt, data);
+      cb({ success: true });
+    }))
+  );
+
+  // annotation draw
+  socket.on('draw', safeHandler((data, cb) => {
+    if (
+      !data ||
+      typeof data.room !== 'string' ||
+      !Array.isArray(data.points) ||
+      typeof data.color !== 'number' ||
+      typeof data.width !== 'number'
+    ) {
+      return cb({ error: 'invalid_payload' });
+    }
+    socket.to(data.room).emit('draw', data);
+    cb({ success: true });
+  }));
+
+  // undo / clear / color
+  socket.on('undo', safeHandler((room, cb) => {
+    if (typeof room !== 'string') return cb({ error: 'invalid_room' });
+    socket.to(room).emit('undo');
+    cb({ success: true });
+  }));
+  socket.on('clear', safeHandler((room, cb) => {
+    if (typeof room !== 'string') return cb({ error: 'invalid_room' });
+    socket.to(room).emit('clear');
+    cb({ success: true });
+  }));
+  socket.on('color', safeHandler((data, cb) => {
+    if (
+      !data ||
+      typeof data.room !== 'string' ||
+      typeof data.color !== 'number'
+    ) {
+      return cb({ error: 'invalid_payload' });
+    }
+    socket.to(data.room).emit('color', data.color);
+    cb({ success: true });
+  }));
 
   socket.on('disconnect', reason => {
-    logger.info('Client disconnected', { socketId: socket.id, reason });
+    logger.info('❌ Client disconnected', { socketId: socket.id, reason });
   });
 });
 
 // ——————————
-// 9) Start the server
+// 9) Start server
 // ——————————
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
-  logger.info(`🚀 Signaling server is live on port ${PORT}`);
+  logger.info(`🚀 Signaling server running on port ${PORT}`);
 });
