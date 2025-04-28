@@ -1,14 +1,13 @@
 // signaling-server/index.js
-import 'dotenv/config';
-import express from 'express';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import { createClient } from 'redis';
-import { createAdapter } from '@socket.io/redis-adapter';
-import winston from 'winston';
-import admin from 'firebase-admin';
+require('dotenv').config();
+
+const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const http = require('http');
+const { Server } = require('socket.io');
+const winston = require('winston');
+const admin = require('firebase-admin');
 
 // ——————————
 // 1) Init Firebase Admin (for verifying ID tokens)
