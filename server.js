@@ -1,6 +1,5 @@
 // server.js
 
-// 1) Load env
 require('dotenv').config();
 
 const express = require('express');
@@ -11,29 +10,25 @@ const { Server } = require('socket.io');
 const winston = require('winston');
 const admin = require('firebase-admin');
 
-// ——————————
-// 2) Firebase Admin
-// ——————————
-
-// Parse SERVICE_ACCOUNT_KEY as JSON
-
+// 1) Firebase Admin
 admin.initializeApp({
   credential: admin.credential.cert({
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
-  client_id: process.env.FIREBASE_CLIENT_ID,
-  auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-  token_uri: 'https://oauth2.googleapis.com/token',
-  auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
-  client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(process.env.FIREBASE_CLIENT_EMAIL)}`,
-  })
+    project_id: process.env.FIREBASE_PROJECT_ID,
+    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    client_email: process.env.FIREBASE_CLIENT_EMAIL,
+    client_id: process.env.FIREBASE_CLIENT_ID,
+    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+    token_uri: 'https://oauth2.googleapis.com/token',
+    auth_provider_x509_cert_url:
+      'https://www.googleapis.com/oauth2/v1/certs',
+    client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(
+      process.env.FIREBASE_CLIENT_EMAIL,
+    )}`,
+  }),
 });
 
-// ——————————
-// 3) Express + security
-// ——————————
+// 2) Express + security
 const app = express();
 app.use(helmet());
 app.use(express.json());
@@ -41,36 +36,31 @@ app.use(
   rateLimit({
     windowMs: 60_000,
     max: 200,
-  })
+  }),
 );
 
 app.get('/health', (_req, res) =>
-  res.json({ status: 'ok', timestamp: Date.now() })
+  res.json({ status: 'ok', timestamp: Date.now() }),
 );
 
-// ——————————
-// 4) Logger
-// ——————————
+// 3) Logger
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
     winston.format.timestamp(),
-    winston.format.json()
+    winston.format.json(),
   ),
   transports: [new winston.transports.Console()],
 });
 
-// ——————————
-// 5) HTTP + Socket.IO
-// ——————————
+// 4) HTTP + Socket.IO
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET','POST'] },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
-// ——————————
-// 6) (Optional) Auth middleware
-// ——————————
+// 5) (Optional) Auth middleware — disabled until the client starts sending tokens
+/*
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth.token;
@@ -83,10 +73,9 @@ io.use(async (socket, next) => {
     next(new Error('Unauthorized'));
   }
 });
+*/
 
-// ——————————
-// 7) Safe handler
-// ——————————
+// 6) Safe wrapper
 function safeHandler(fn) {
   return (payload, cb = () => {}) => {
     try {
@@ -98,22 +87,17 @@ function safeHandler(fn) {
   };
 }
 
-// ——————————
-// 8) Socket logic
-// ——————————
+// 7) Signaling & annotations
 io.on('connection', socket => {
-  const uid = socket.data.user?.uid;
-  logger.info('📡 Client connected', { socketId: socket.id, uid });
+  logger.info('📡 Client connected', { socketId: socket.id });
 
-  // join
   socket.on('join', safeHandler((room, cb) => {
     if (typeof room !== 'string') return cb({ error: 'invalid_room' });
     socket.join(room);
     cb({ success: true });
   }));
 
-  // signaling
-  ['offer','answer','candidate'].forEach(evt =>
+  ['offer', 'answer', 'candidate'].forEach(evt =>
     socket.on(evt, safeHandler((data, cb) => {
       if (
         !data ||
@@ -126,43 +110,25 @@ io.on('connection', socket => {
       }
       socket.to(data.room).emit(evt, data);
       cb({ success: true });
-    }))
+    })),
   );
 
-  // annotation draw
   socket.on('draw', safeHandler((data, cb) => {
-    if (
-      !data ||
-      typeof data.room !== 'string' ||
-      !Array.isArray(data.points) ||
-      typeof data.color !== 'number' ||
-      typeof data.width !== 'number'
-    ) {
-      return cb({ error: 'invalid_payload' });
-    }
     socket.to(data.room).emit('draw', data);
     cb({ success: true });
   }));
 
-  // undo / clear / color
   socket.on('undo', safeHandler((room, cb) => {
-    if (typeof room !== 'string') return cb({ error: 'invalid_room' });
     socket.to(room).emit('undo');
     cb({ success: true });
   }));
+
   socket.on('clear', safeHandler((room, cb) => {
-    if (typeof room !== 'string') return cb({ error: 'invalid_room' });
     socket.to(room).emit('clear');
     cb({ success: true });
   }));
+
   socket.on('color', safeHandler((data, cb) => {
-    if (
-      !data ||
-      typeof data.room !== 'string' ||
-      typeof data.color !== 'number'
-    ) {
-      return cb({ error: 'invalid_payload' });
-    }
     socket.to(data.room).emit('color', data.color);
     cb({ success: true });
   }));
@@ -172,9 +138,7 @@ io.on('connection', socket => {
   });
 });
 
-// ——————————
-// 9) Start server
-// ——————————
+// 8) Launch
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   logger.info(`🚀 Signaling server running on port ${PORT}`);
